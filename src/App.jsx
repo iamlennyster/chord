@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useMemo, useRef } from "react";
 
 /* ─── Data ─────────────────────────────────────────────────────────── */
 const ROOTS = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
@@ -31,48 +31,177 @@ const NOTE_NAMES_PT = {
   5:'Fá',6:'Fá#',7:'Sol',8:'Sol#',9:'Lá',10:'Lá#',11:'Si'
 };
 
-// 2 octaves of white keys: pitch classes
 const WHITE_KEYS = [0,2,4,5,7,9,11, 0,2,4,5,7,9,11];
-// [pitchClass, leftPct] for black keys in 2 octaves
 const BLACK_KEYS = [
   [1,5.00],[3,12.14],[6,26.43],[8,33.57],[10,40.71],
   [1,54.99],[3,62.14],[6,76.43],[8,83.57],[10,90.71],
 ];
 
-/* ─── Magnificat enrichment ─────────────────────────────────────────── */
+/* ─── Instruments ───────────────────────────────────────────────────── */
+const INSTRUMENTS = [
+  {
+    id: 'piano',
+    label: 'PIANO',
+    icon: '♩',
+    // Warm, sustained, mid register
+    baseOctave: 1,
+    strumMs: 28,
+    synth: (ctx, freq, t, dur, magOn) => {
+      // triangle body + sine air
+      [['triangle', 0.10], ['sine', 0.06]].forEach(([type, vol], j) => {
+        const osc  = ctx.createOscillator();
+        const env  = ctx.createGain();
+        const filt = ctx.createBiquadFilter();
+        osc.type = type;
+        osc.frequency.value = freq * (1 + j * 0.0015);
+        filt.type = 'lowpass';
+        filt.frequency.value = magOn ? 2800 : 2200;
+        filt.Q.value = 0.8;
+        env.gain.setValueAtTime(0, t);
+        env.gain.linearRampToValueAtTime(vol, t + 0.012);
+        env.gain.exponentialRampToValueAtTime(vol * 0.55, t + 0.3);
+        env.gain.setValueAtTime(vol * 0.55, t + dur - 0.7);
+        env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        osc.connect(filt); filt.connect(env);
+        osc.start(t); osc.stop(t + dur + 0.1);
+        return env;
+      });
+    },
+    delayTime: (mag) => mag ? 0.38 : 0.22,
+    delayFb:   (mag) => mag ? 0.28 : 0.18,
+    delayMix:  0.18,
+    dur: (mag) => mag ? 3.6 : 2.6,
+    masterVol: 0.52,
+  },
+  {
+    id: 'ukulele',
+    label: 'UKULELE',
+    icon: '𝄞',
+    // Bright, short, high register — nylon pluck
+    baseOctave: 2,
+    strumMs: 18,
+    synth: (ctx, freq, t, dur) => {
+      // sine fundamental + 2nd harmonic (very bright)
+      [[freq, 0.12], [freq * 2, 0.04], [freq * 3, 0.015]].forEach(([f, vol]) => {
+        const osc  = ctx.createOscillator();
+        const env  = ctx.createGain();
+        const filt = ctx.createBiquadFilter();
+        osc.type = 'sine';
+        osc.frequency.value = f;
+        filt.type = 'bandpass';
+        filt.frequency.value = f * 1.8;
+        filt.Q.value = 1.2;
+        // Pluck: fast attack, exponential decay
+        env.gain.setValueAtTime(0, t);
+        env.gain.linearRampToValueAtTime(vol, t + 0.006);
+        env.gain.exponentialRampToValueAtTime(vol * 0.3, t + 0.12);
+        env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        osc.connect(filt); filt.connect(env);
+        osc.start(t); osc.stop(t + dur + 0.05);
+        return env;
+      });
+    },
+    delayTime: () => 0.14,
+    delayFb:   () => 0.12,
+    delayMix:  0.12,
+    dur: (mag) => mag ? 1.8 : 1.2,
+    masterVol: 0.58,
+  },
+  {
+    id: 'violao',
+    label: 'VIOLÃO',
+    icon: '♪',
+    // Warm pluck, wider range, steel-string feel — Karplus-Strong-like
+    baseOctave: 0,  // bass notes start low, treble notes go up
+    strumMs: 38,
+    synth: (ctx, freq, t, dur) => {
+      // Karplus-Strong approximation: noise burst shaped by lowpass
+      const bufferSize = ctx.sampleRate * 0.08;
+      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data   = buffer.getChannelData(0);
+
+      // Fill with shaped noise (decaying)
+      const period = Math.round(ctx.sampleRate / freq);
+      for (let s = 0; s < bufferSize; s++) {
+        if (s < period * 2) {
+          // Initial pluck energy
+          data[s] = (Math.random() * 2 - 1) * (1 - s / (period * 2));
+        } else {
+          // KS feedback: average of previous samples (approximated)
+          data[s] = (data[s - period] + data[s - period + 1]) * 0.499;
+        }
+      }
+
+      const src  = ctx.createBufferSource();
+      const filt = ctx.createBiquadFilter();
+      const env  = ctx.createGain();
+
+      src.buffer = buffer;
+      src.loop   = true;
+      src.loopEnd = period / ctx.sampleRate;
+
+      filt.type = 'lowpass';
+      filt.frequency.value = 3200;
+      filt.Q.value = 0.5;
+
+      env.gain.setValueAtTime(0.14, t);
+      env.gain.exponentialRampToValueAtTime(0.08, t + 0.1);
+      env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+      src.connect(filt); filt.connect(env);
+      src.start(t); src.stop(t + dur + 0.05);
+      return env;
+    },
+    delayTime: () => 0.28,
+    delayFb:   () => 0.15,
+    delayMix:  0.14,
+    dur: (mag) => mag ? 3.2 : 2.2,
+    masterVol: 0.60,
+  },
+];
+
+/* ─── Magnificat ────────────────────────────────────────────────────── */
 function magnify(intervals, typeId) {
   const base = new Set(intervals);
   const add = [];
-  // Add 9th (color tone) to almost everything
   if (!base.has(2) && !base.has(1)) add.push(2);
-  // Major-ish: add 13th
-  if (['major','maj7','dom7','add9','6'].includes(typeId) && !base.has(9)) add.push(9);
-  // Minor: add 11th
-  if (['minor','min7','min9','m6'].includes(typeId) && !base.has(5)) add.push(5);
-  // Diminuto: add major 7th
-  if (['dim','halfdim'].includes(typeId) && !base.has(11)) add.push(11);
-  // Dom7: add ♭9 tension
-  if (typeId === 'dom7' && !base.has(1)) { add.push(1); }
-  // Sus chords: add major 7th
-  if (['sus','sus2'].includes(typeId) && !base.has(11)) add.push(11);
+  if (['major','maj7','dom7','add9','6'].includes(typeId) && !base.has(9))  add.push(9);
+  if (['minor','min7','min9','m6'].includes(typeId)       && !base.has(5))  add.push(5);
+  if (['dim','halfdim'].includes(typeId)                  && !base.has(11)) add.push(11);
+  if (typeId === 'dom7'                                   && !base.has(1))  add.push(1);
+  if (['sus','sus2'].includes(typeId)                     && !base.has(11)) add.push(11);
   return add;
 }
 
-/* ─── Audio synthesis ───────────────────────────────────────────────── */
-const C3_FREQ = 130.813; // C3
+/* ─── Audio engine ──────────────────────────────────────────────────── */
+const BASE_C = { 0: 32.703, 1: 65.406, 2: 130.813, 3: 261.626 }; // C0–C3
 
-function noteFreq(pitchClass, octaveShift = 0) {
-  return C3_FREQ * Math.pow(2, (pitchClass + octaveShift * 12) / 12);
+function noteFreq(pitchClass, octave) {
+  return BASE_C[octave] * Math.pow(2, pitchClass / 12);
 }
 
-function buildVoicing(rootIdx, intervals, extraIntervals) {
-  // Spread notes across ~2.5 octaves for richness
-  const all = [...intervals, ...extraIntervals].sort((a,b)=>a-b);
+function buildVoicing(rootIdx, intervals, extraIntervals, instrument) {
+  const all = [...intervals, ...extraIntervals].sort((a, b) => a - b);
+  const base = instrument.baseOctave;
+
   return all.map((interval, i) => {
-    const pc = (rootIdx + interval) % 12;
-    // bump up an octave if interval >= 12 or for color tones at top
-    const oct = interval >= 12 ? 2 : (i > 2 && interval < intervals[i-1]) ? 2 : 1;
-    return noteFreq(pc, oct);
+    const pc  = (rootIdx + interval) % 12;
+    // Spread: bass on bottom, treble climb up
+    let oct = base;
+    if (instrument.id === 'violao') {
+      // Guitar spread: bass 2 bottom strings, middle, treble
+      if (i === 0) oct = base;
+      else if (i === 1) oct = base;
+      else if (i <= 3)  oct = base + 1;
+      else              oct = base + 2;
+    } else if (instrument.id === 'ukulele') {
+      // Uke: tight high voicing
+      oct = i < 2 ? base : base + 1;
+    } else {
+      // Piano
+      oct = i < 3 ? base : base + 1;
+    }
+    return noteFreq(pc, Math.min(oct, 3));
   });
 }
 
@@ -85,62 +214,148 @@ function getCtx() {
   return globalCtx;
 }
 
-function playChordAudio(frequencies, magnificatOn) {
+function playChord(frequencies, instrument, magOn) {
   const ctx = getCtx();
   const now = ctx.currentTime;
 
-  // Master chain
   const master = ctx.createGain();
-  master.gain.value = 0.55;
+  master.gain.value = instrument.masterVol;
   master.connect(ctx.destination);
 
-  // Warm delay/reverb
-  const delay = ctx.createDelay(1.0);
-  delay.delayTime.value = magnificatOn ? 0.38 : 0.22;
-  const fbGain = ctx.createGain();
-  fbGain.gain.value = magnificatOn ? 0.28 : 0.18;
+  // Delay/reverb
+  const delay    = ctx.createDelay(1.0);
+  const fbGain   = ctx.createGain();
   const delayOut = ctx.createGain();
-  delayOut.gain.value = 0.18;
-  delay.connect(fbGain);
-  fbGain.connect(delay);
-  delay.connect(delayOut);
-  delayOut.connect(master);
+  delay.delayTime.value = instrument.delayTime(magOn);
+  fbGain.gain.value     = instrument.delayFb(magOn);
+  delayOut.gain.value   = instrument.delayMix;
+  delay.connect(fbGain); fbGain.connect(delay);
+  delay.connect(delayOut); delayOut.connect(master);
+
+  const dur      = instrument.dur(magOn);
+  const strumSec = instrument.strumMs / 1000;
 
   frequencies.forEach((freq, i) => {
-    const t = now + i * 0.028; // strum timing
-    const dur = magnificatOn ? 3.5 : 2.5;
+    const t = now + i * strumSec;
+    const envNodes = instrument.synth(ctx, freq, t, dur, magOn);
 
-    // Two oscillators per note: triangle body + sine air
-    [[`triangle`, 0.10], [`sine`, 0.06]].forEach(([type, vol], j) => {
-      const osc = ctx.createOscillator();
-      const env = ctx.createGain();
-      const filt = ctx.createBiquadFilter();
-
-      osc.type = type;
-      osc.frequency.value = freq * (1 + (j * 0.0015)); // subtle detune
-
-      filt.type = 'lowpass';
-      filt.frequency.value = magnificatOn ? 2800 : 2200;
-      filt.Q.value = 0.8;
-
-      env.gain.setValueAtTime(0, t);
-      env.gain.linearRampToValueAtTime(vol, t + 0.012);
-      env.gain.exponentialRampToValueAtTime(vol * 0.55, t + 0.25);
-      env.gain.setValueAtTime(vol * 0.55, t + dur - 0.6);
-      env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-
-      osc.connect(filt);
-      filt.connect(env);
-      env.connect(master);
-      env.connect(delay);
-
-      osc.start(t);
-      osc.stop(t + dur + 0.1);
-    });
+    // Connect returned env nodes to master + delay if they exist
+    if (envNodes) {
+      [].concat(envNodes).forEach(env => {
+        try { env.connect(master); env.connect(delay); } catch(_) {}
+      });
+    } else {
+      // For instruments that wire internally, hook last gain to master
+      // We rely on internal wiring reaching master via closure
+    }
   });
 }
 
-/* ─── Voice recognition ──────────────────────────────────────────────── */
+/* ─── Fix: instruments wire env internally, we need to hook master ─── */
+// Rewire: pass master + delay into synth
+function playChordFixed(frequencies, instrument, magOn) {
+  const ctx = getCtx();
+  const now = ctx.currentTime;
+
+  const master = ctx.createGain();
+  master.gain.value = instrument.masterVol;
+  master.connect(ctx.destination);
+
+  const delay    = ctx.createDelay(1.2);
+  const fbGain   = ctx.createGain();
+  const delayOut = ctx.createGain();
+  delay.delayTime.value = instrument.delayTime(magOn);
+  fbGain.gain.value     = instrument.delayFb(magOn);
+  delayOut.gain.value   = instrument.delayMix;
+  delay.connect(fbGain); fbGain.connect(delay);
+  delay.connect(delayOut); delayOut.connect(master);
+
+  const dur      = instrument.dur(magOn);
+  const strumSec = instrument.strumMs / 1000;
+
+  frequencies.forEach((freq, i) => {
+    const t = now + i * strumSec;
+
+    if (instrument.id === 'piano') {
+      [['triangle', 0.10], ['sine', 0.06]].forEach(([type, vol], j) => {
+        const osc  = ctx.createOscillator();
+        const env  = ctx.createGain();
+        const filt = ctx.createBiquadFilter();
+        osc.type = type;
+        osc.frequency.value = freq * (1 + j * 0.0015);
+        filt.type = 'lowpass';
+        filt.frequency.value = magOn ? 2800 : 2200;
+        filt.Q.value = 0.8;
+        env.gain.setValueAtTime(0, t);
+        env.gain.linearRampToValueAtTime(vol, t + 0.012);
+        env.gain.exponentialRampToValueAtTime(vol * 0.55, t + 0.3);
+        env.gain.setValueAtTime(vol * 0.55, t + dur - 0.7);
+        env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        osc.connect(filt); filt.connect(env);
+        env.connect(master); env.connect(delay);
+        osc.start(t); osc.stop(t + dur + 0.1);
+      });
+    }
+
+    if (instrument.id === 'ukulele') {
+      [[freq, 0.13], [freq * 2, 0.045], [freq * 3, 0.018]].forEach(([f, vol]) => {
+        const osc  = ctx.createOscillator();
+        const env  = ctx.createGain();
+        const filt = ctx.createBiquadFilter();
+        osc.type = 'sine';
+        osc.frequency.value = f;
+        filt.type = 'bandpass';
+        filt.frequency.value = f * 1.6;
+        filt.Q.value = 1.4;
+        env.gain.setValueAtTime(0, t);
+        env.gain.linearRampToValueAtTime(vol, t + 0.005);
+        env.gain.exponentialRampToValueAtTime(vol * 0.25, t + 0.1);
+        env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        osc.connect(filt); filt.connect(env);
+        env.connect(master); env.connect(delay);
+        osc.start(t); osc.stop(t + dur + 0.05);
+      });
+    }
+
+    if (instrument.id === 'violao') {
+      // Karplus-Strong approximation
+      const sampleRate = ctx.sampleRate;
+      const period     = Math.max(2, Math.round(sampleRate / freq));
+      const bufLen     = period * 80; // ~enough cycles for the dur
+      const buffer     = ctx.createBuffer(1, bufLen, sampleRate);
+      const data       = buffer.getChannelData(0);
+
+      // Seed: short noise burst
+      for (let s = 0; s < period; s++) {
+        data[s] = Math.random() * 2 - 1;
+      }
+      // KS feedback average
+      for (let s = period; s < bufLen; s++) {
+        data[s] = (data[s - period] + data[s - period + 1]) * 0.4995;
+      }
+
+      const src  = ctx.createBufferSource();
+      const filt = ctx.createBiquadFilter();
+      const env  = ctx.createGain();
+
+      src.buffer = buffer;
+      filt.type  = 'lowpass';
+      filt.frequency.value = 4000;
+      filt.Q.value = 0.4;
+
+      env.gain.setValueAtTime(0.0001, t);
+      env.gain.linearRampToValueAtTime(0.22, t + 0.004);
+      env.gain.exponentialRampToValueAtTime(0.10, t + 0.08);
+      env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+      src.connect(filt); filt.connect(env);
+      env.connect(master); env.connect(delay);
+      src.start(t); src.stop(t + dur + 0.05);
+    }
+  });
+}
+
+/* ─── Voice recognition ─────────────────────────────────────────────── */
 function parseVoice(text, setRoot, setTypeId) {
   const noteMap = [
     ['dó#','C#'],['do#','C#'],['ré#','D#'],['re#','D#'],
@@ -149,27 +364,39 @@ function parseVoice(text, setRoot, setTypeId) {
     ['fá','F'],['fa','F'],['sol','G'],['lá','A'],['la','A'],['si','B'],
   ];
   for (const [k, v] of noteMap) { if (text.includes(k)) { setRoot(v); break; } }
-  if (/menor.?sete|m7/.test(text))          setTypeId('min7');
-  else if (/maior.?sete|maj7/.test(text))   setTypeId('maj7');
-  else if (/nona maior|maj9/.test(text))    setTypeId('maj9');
-  else if (/nona/.test(text))               setTypeId('9');
-  else if (/sete|dominante/.test(text))     setTypeId('dom7');
-  else if (/menor/.test(text))              setTypeId('minor');
-  else if (/maior/.test(text))              setTypeId('major');
-  else if (/diminu/.test(text))             setTypeId('dim');
-  else if (/aument/.test(text))             setTypeId('aug');
-  else if (/sus.*dois|sus2/.test(text))     setTypeId('sus2');
-  else if (/sus/.test(text))                setTypeId('sus');
-  else if (/semi/.test(text))               setTypeId('halfdim');
-  else if (/sexta menor|m6/.test(text))     setTypeId('m6');
-  else if (/sexta|6/.test(text))            setTypeId('6');
+  if      (/menor.?sete|m7/.test(text))        setTypeId('min7');
+  else if (/maior.?sete|maj7/.test(text))      setTypeId('maj7');
+  else if (/nona maior|maj9/.test(text))       setTypeId('maj9');
+  else if (/nona/.test(text))                  setTypeId('9');
+  else if (/sete|dominante/.test(text))        setTypeId('dom7');
+  else if (/menor/.test(text))                 setTypeId('minor');
+  else if (/maior/.test(text))                 setTypeId('major');
+  else if (/diminu/.test(text))                setTypeId('dim');
+  else if (/aument/.test(text))                setTypeId('aug');
+  else if (/sus.*dois|sus2/.test(text))        setTypeId('sus2');
+  else if (/sus/.test(text))                   setTypeId('sus');
+  else if (/semi/.test(text))                  setTypeId('halfdim');
+  else if (/sexta menor|m6/.test(text))        setTypeId('m6');
+  else if (/sexta|6/.test(text))               setTypeId('6');
 }
 
-/* ─── Piano component ───────────────────────────────────────────────── */
+/* ─── Sub-components ────────────────────────────────────────────────── */
+function Screw() {
+  return (
+    <div style={{
+      width:'11px', height:'11px', borderRadius:'50%',
+      background:'radial-gradient(circle at 35% 35%, #4A4A44, #222220)',
+      boxShadow:'0 1px 3px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.06)',
+      flexShrink:0, position:'relative',
+    }}>
+      <div style={{ width:'60%', height:'1.5px', background:'rgba(0,0,0,0.55)', position:'absolute', top:'49%', left:'20%', transform:'rotate(42deg)' }}/>
+    </div>
+  );
+}
+
 function Piano({ activeNotes, extraNotes }) {
   return (
-    <div style={{ position:'relative', width:'100%', height:'148px', userSelect:'none' }}>
-      {/* White keys */}
+    <div style={{ position:'relative', width:'100%', height:'144px', userSelect:'none' }}>
       <div style={{ display:'flex', height:'100%', gap:'2px' }}>
         {WHITE_KEYS.map((note, i) => {
           const isActive = activeNotes.has(note);
@@ -178,52 +405,50 @@ function Piano({ activeNotes, extraNotes }) {
             <div key={i} style={{
               flex:1,
               background: isActive
-                ? 'linear-gradient(180deg, #E8660A 0%, #CC4400 100%)'
+                ? 'linear-gradient(180deg,#E8660A 0%,#CC4400 100%)'
                 : isExtra
-                  ? 'linear-gradient(180deg, #F5D5A0 0%, #E8C070 100%)'
-                  : 'linear-gradient(180deg, #EDEAE0 0%, #D8D4C8 100%)',
+                  ? 'linear-gradient(180deg,#E8C060 0%,#C89040 100%)'
+                  : 'linear-gradient(180deg,#E8E4D8 0%,#CECA BC 100%)',
               borderRadius:'0 0 6px 6px',
               boxShadow: isActive
-                ? 'inset 0 -3px 0 rgba(0,0,0,0.3), 0 2px 8px rgba(204,68,0,0.5)'
+                ? 'inset 0 -3px 0 rgba(0,0,0,0.35),0 2px 10px rgba(204,68,0,0.5)'
                 : isExtra
-                  ? 'inset 0 -3px 0 rgba(0,0,0,0.15), 0 2px 4px rgba(0,0,0,0.25)'
-                  : 'inset 0 -4px 0 rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.6), 0 2px 4px rgba(0,0,0,0.3)',
-              transition:'background 0.08s ease, box-shadow 0.08s ease',
+                  ? 'inset 0 -3px 0 rgba(0,0,0,0.2),0 1px 4px rgba(0,0,0,0.3)'
+                  : 'inset 0 -4px 0 rgba(0,0,0,0.2),inset 0 1px 0 rgba(255,255,255,0.5),0 2px 4px rgba(0,0,0,0.35)',
+              transition:'background 0.08s,box-shadow 0.08s',
               position:'relative',
             }}>
               {(isActive || isExtra) && (
                 <div style={{
-                  position:'absolute', bottom:'10px', left:'50%',
+                  position:'absolute', bottom:'9px', left:'50%',
                   transform:'translateX(-50%)',
                   width:'5px', height:'5px', borderRadius:'50%',
-                  background: isExtra ? 'rgba(180,120,0,0.7)' : 'rgba(255,255,255,0.6)',
+                  background: isExtra ? 'rgba(160,100,0,0.7)' : 'rgba(255,255,255,0.55)',
                 }}/>
               )}
             </div>
           );
         })}
       </div>
-      {/* Black keys */}
       {BLACK_KEYS.map(([pitch, left], i) => {
         const isActive = activeNotes.has(pitch);
         const isExtra  = extraNotes.has(pitch) && !isActive;
         return (
           <div key={i} style={{
             position:'absolute', top:0,
-            left:`calc(${left}% + 1px)`,
-            width:'calc(4.28% - 1px)', height:'58%',
+            left:`calc(${left}% + 1px)`, width:'calc(4.28% - 1px)', height:'58%',
             background: isActive
-              ? 'linear-gradient(180deg, #FF6622 0%, #CC3300 100%)'
+              ? 'linear-gradient(180deg,#FF6622 0%,#CC3300 100%)'
               : isExtra
-                ? 'linear-gradient(180deg, #886622 0%, #664400 100%)'
-                : 'linear-gradient(180deg, #3A3835 0%, #1A1816 100%)',
+                ? 'linear-gradient(180deg,#8B6222 0%,#5A3E0A 100%)'
+                : 'linear-gradient(180deg,#3A3835 0%,#1A1816 100%)',
             borderRadius:'0 0 4px 4px', zIndex:2,
             boxShadow: isActive
-              ? '0 4px 16px rgba(204,68,0,0.6), inset 0 1px 0 rgba(255,140,80,0.4)'
+              ? '0 4px 16px rgba(204,68,0,0.55),inset 0 1px 0 rgba(255,140,80,0.3)'
               : isExtra
-                ? '0 3px 8px rgba(100,60,0,0.4), inset 0 1px 0 rgba(160,100,40,0.3)'
-                : 'inset 0 -2px 0 rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.08), 0 4px 8px rgba(0,0,0,0.5)',
-            transition:'background 0.08s ease, box-shadow 0.08s ease',
+                ? '0 3px 8px rgba(100,60,0,0.4)'
+                : 'inset 0 -2px 0 rgba(0,0,0,0.6),inset 0 1px 0 rgba(255,255,255,0.07),0 4px 8px rgba(0,0,0,0.5)',
+            transition:'background 0.08s,box-shadow 0.08s',
           }}/>
         );
       })}
@@ -231,65 +456,73 @@ function Piano({ activeNotes, extraNotes }) {
   );
 }
 
-/* ─── Screw decoration ───────────────────────────────────────────────── */
-function Screw({ style }) {
+/* ─── Instrument selector button ────────────────────────────────────── */
+function InstrumentBtn({ instrument, active, onClick }) {
+  const icons = { piano: '⊟', ukulele: '⊞', violao: '⊠' };
   return (
-    <div style={{
-      width:'12px', height:'12px', borderRadius:'50%',
-      background:'radial-gradient(circle at 35% 35%, #4A4A46, #2A2A26)',
-      boxShadow:'0 1px 3px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.08)',
-      flexShrink:0, ...style,
+    <button onClick={onClick} style={{
+      flex:1, padding:'10px 8px',
+      background: active
+        ? 'linear-gradient(160deg,#3A2800,#281C00)'
+        : 'linear-gradient(160deg,#2A2A26,#1E1E1C)',
+      border:`1px solid ${active ? '#AA7722' : '#343430'}`,
+      borderRadius:'5px',
+      cursor:'pointer',
+      display:'flex', flexDirection:'column', alignItems:'center', gap:'6px',
+      boxShadow: active
+        ? '0 0 12px rgba(170,119,34,0.35),inset 0 1px 0 rgba(255,200,80,0.15)'
+        : 'inset 0 2px 4px rgba(0,0,0,0.5)',
+      transition:'all 0.12s',
     }}>
+      {/* Indicator LED */}
       <div style={{
-        width:'60%', height:'1.5px', background:'rgba(0,0,0,0.6)',
-        position:'relative', top:'49%', left:'20%',
-        transform:'rotate(45deg)',
-        boxShadow:'0 0.5px 0 rgba(255,255,255,0.08)',
+        width:'6px', height:'6px', borderRadius:'50%',
+        background: active ? '#FFCC44' : '#2E2E2A',
+        boxShadow: active ? '0 0 8px rgba(255,200,60,0.8)' : 'none',
+        transition:'all 0.12s',
       }}/>
-    </div>
-  );
-}
-
-/* ─── LED display char ───────────────────────────────────────────────── */
-function LEDDisplay({ children, small }) {
-  return (
-    <div style={{
-      fontFamily:"'VT323', 'Courier New', monospace",
-      fontSize: small ? '13px' : 'clamp(52px, 10vw, 88px)',
-      color:'#FFAA00',
-      textShadow:'0 0 12px rgba(255,170,0,0.8), 0 0 30px rgba(255,140,0,0.4)',
-      letterSpacing: small ? '0.1em' : '0.02em',
-      lineHeight:1,
-      fontWeight:'normal',
-    }}>
-      {children}
-    </div>
+      {/* Label */}
+      <div style={{
+        fontSize:'8px', letterSpacing:'0.18em',
+        fontFamily:"'IBM Plex Mono', monospace",
+        color: active ? '#FFCC44' : '#5C5C52',
+        textTransform:'uppercase',
+        transition:'color 0.12s',
+      }}>
+        {instrument.label}
+      </div>
+    </button>
   );
 }
 
 /* ─── Main App ───────────────────────────────────────────────────────── */
 export default function App() {
-  const [root,       setRoot]       = useState('C');
-  const [typeId,     setTypeId]     = useState('major');
-  const [magnificat, setMagnicat]   = useState(false);
-  const [playing,    setPlaying]    = useState(false);
-  const [listening,  setListening]  = useState(false);
-  const [voiceMsg,   setVoiceMsg]   = useState('');
-  const [search,     setSearch]     = useState('');
+  const [root,        setRoot]       = useState('C');
+  const [typeId,      setTypeId]     = useState('major');
+  const [instId,      setInstId]     = useState('piano');
+  const [magnificat,  setMagnicat]   = useState(false);
+  const [playing,     setPlaying]    = useState(false);
+  const [listening,   setListening]  = useState(false);
+  const [voiceMsg,    setVoiceMsg]   = useState('');
+  const [search,      setSearch]     = useState('');
   const recRef = useRef(null);
 
-  const rootIdx   = ROOTS.indexOf(root);
-  const chord     = CHORD_TYPES.find(c => c.id === typeId);
-  const intervals = chord?.intervals || [];
+  const rootIdx    = ROOTS.indexOf(root);
+  const chord      = CHORD_TYPES.find(c => c.id === typeId);
+  const instrument = INSTRUMENTS.find(i => i.id === instId);
+  const intervals  = chord?.intervals || [];
 
   const activeNotes = useMemo(() =>
-    new Set(intervals.map(i => (rootIdx + i) % 12)), [rootIdx, intervals]);
+    new Set(intervals.map(i => (rootIdx + i) % 12)),
+    [rootIdx, intervals]);
 
   const extraIntervals = useMemo(() =>
-    magnificat ? magnify(intervals, typeId) : [], [magnificat, intervals, typeId]);
+    magnificat ? magnify(intervals, typeId) : [],
+    [magnificat, intervals, typeId]);
 
   const extraNotes = useMemo(() =>
-    new Set(extraIntervals.map(i => (rootIdx + i) % 12)), [rootIdx, extraIntervals]);
+    new Set(extraIntervals.map(i => (rootIdx + i) % 12)),
+    [rootIdx, extraIntervals]);
 
   const chordName    = root + (chord?.display || '');
   const noteListFull = [...activeNotes].sort((a,b)=>a-b).map(n=>NOTE_NAMES_PT[n]).join(' — ');
@@ -304,10 +537,10 @@ export default function App() {
   }, [search]);
 
   const handlePlay = () => {
-    const freqs = buildVoicing(rootIdx, intervals, extraIntervals);
+    const freqs = buildVoicing(rootIdx, intervals, extraIntervals, instrument);
     setPlaying(true);
-    playChordAudio(freqs, magnificat);
-    setTimeout(() => setPlaying(false), 600);
+    playChordFixed(freqs, instrument, magnificat);
+    setTimeout(() => setPlaying(false), 500);
   };
 
   const startListening = () => {
@@ -329,211 +562,201 @@ export default function App() {
 
   const mono = "'IBM Plex Mono', monospace";
   const C = {
-    chassis:  '#1A1918',
-    panel:    '#222220',
-    raised:   '#2C2C28',
-    display:  '#0A0908',
-    border:   '#0E0E0C',
-    stripe:   '#CC4400',
-    amber:    '#FFAA00',
-    label:    '#5C5C52',
-    labelBrt: '#8C8C80',
-    ivory:    '#EDEAE0',
-    dim:      '#D0CCC0',
-    orange:   '#CC4400',
+    chassis: '#1A1918',
+    panel:   '#222220',
+    display: '#080806',
+    label:   '#5C5C52',
+    lblBrt:  '#8C8C80',
+    border:  '#343430',
+    stripe:  '#CC4400',
+    amber:   '#FFAA00',
+    orange:  '#CC4400',
   };
 
   return (
     <div style={{ minHeight:'100vh', background:C.chassis, display:'flex', alignItems:'center', justifyContent:'center', padding:'24px 16px', fontFamily:mono }}>
 
-      {/* ── Chassis ── */}
       <div style={{
         width:'100%', maxWidth:'680px',
-        background:`linear-gradient(160deg, #272724 0%, #1E1D1B 50%, #1A1918 100%)`,
+        background:'linear-gradient(160deg,#272724 0%,#1E1D1B 60%,#1A1918 100%)',
         borderRadius:'12px',
-        boxShadow:'0 0 0 1px #0A0908, 0 8px 48px rgba(0,0,0,0.8), 0 2px 4px rgba(0,0,0,0.9)',
+        boxShadow:'0 0 0 1px #0A0908,0 10px 60px rgba(0,0,0,0.85),0 2px 4px rgba(0,0,0,0.9)',
         padding:'24px',
         position:'relative',
         overflow:'hidden',
       }}>
 
-        {/* Orange accent stripe top */}
-        <div style={{ position:'absolute', top:0, left:0, right:0, height:'3px', background:`linear-gradient(90deg, ${C.stripe} 0%, #FF6622 40%, ${C.stripe} 100%)`, borderRadius:'12px 12px 0 0' }}/>
+        {/* Top stripe */}
+        <div style={{ position:'absolute', top:0, left:0, right:0, height:'3px', background:`linear-gradient(90deg,${C.stripe} 0%,#FF6622 40%,${C.stripe} 100%)`, borderRadius:'12px 12px 0 0' }}/>
 
         {/* Screws */}
-        <div style={{ position:'absolute', top:'14px', left:'14px' }}><Screw/></div>
-        <div style={{ position:'absolute', top:'14px', right:'14px' }}><Screw/></div>
-        <div style={{ position:'absolute', bottom:'14px', left:'14px' }}><Screw/></div>
-        <div style={{ position:'absolute', bottom:'14px', right:'14px' }}><Screw/></div>
+        {[['14px','14px'],['14px','auto'],['auto','14px'],['auto','auto']].map(([t,b,l,r],i) => {
+          const pos = [
+            {top:'14px',left:'14px'},{top:'14px',right:'14px'},
+            {bottom:'14px',left:'14px'},{bottom:'14px',right:'14px'}
+          ][i];
+          return <div key={i} style={{ position:'absolute', ...pos }}><Screw/></div>;
+        })}
 
         {/* ── Header ── */}
-        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'20px', paddingBottom:'16px', borderBottom:`1px solid #2E2E2A` }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'20px', paddingBottom:'16px', borderBottom:`1px solid #2A2A26` }}>
           <div>
-            <div style={{ fontSize:'10px', letterSpacing:'0.25em', textTransform:'uppercase', color:C.label, marginBottom:'2px' }}>AKORD</div>
-            <div style={{ fontSize:'8px', letterSpacing:'0.15em', color:'#3C3C36', textTransform:'uppercase' }}>Chord Visualizer • v2</div>
+            <div style={{ fontSize:'10px', letterSpacing:'0.25em', textTransform:'uppercase', color:C.lblBrt, marginBottom:'2px' }}>AKORD</div>
+            <div style={{ fontSize:'8px', letterSpacing:'0.14em', color:'#3C3C36', textTransform:'uppercase' }}>Chord Visualizer · v3</div>
           </div>
           <div style={{ display:'flex', alignItems:'center', gap:'6px' }}>
-            <div style={{ width:'6px', height:'6px', borderRadius:'50%', background: playing ? C.amber : '#3A3A34', boxShadow: playing ? `0 0 8px ${C.amber}` : 'none', transition:'all 0.1s' }}/>
+            <div style={{ width:'6px', height:'6px', borderRadius:'50%', background: playing ? C.amber : '#302E2C', boxShadow: playing ? `0 0 8px ${C.amber}` : 'none', transition:'all 0.1s' }}/>
             <div style={{ fontSize:'8px', letterSpacing:'0.15em', color:C.label, textTransform:'uppercase' }}>SIGNAL</div>
           </div>
         </div>
 
-        {/* ── Display + Play row ── */}
-        <div style={{ display:'flex', gap:'16px', marginBottom:'20px', alignItems:'stretch' }}>
+        {/* ── Instrument selector ── */}
+        <div style={{ marginBottom:'18px' }}>
+          <div style={{ fontSize:'7px', letterSpacing:'0.22em', textTransform:'uppercase', color:C.label, marginBottom:'8px' }}>INSTRUMENTO</div>
+          <div style={{ display:'flex', gap:'6px' }}>
+            {INSTRUMENTS.map(inst => (
+              <InstrumentBtn
+                key={inst.id}
+                instrument={inst}
+                active={instId === inst.id}
+                onClick={() => setInstId(inst.id)}
+              />
+            ))}
+          </div>
+        </div>
 
-          {/* LED Display panel */}
+        {/* ── Display + Play/Magnificat ── */}
+        <div style={{ display:'flex', gap:'14px', marginBottom:'18px', alignItems:'stretch' }}>
+
+          {/* LED Display */}
           <div style={{
             flex:1, background:C.display,
-            border:`1px solid #0C0C0A`,
-            borderRadius:'6px',
-            padding:'16px 20px 12px',
-            boxShadow:'inset 0 2px 12px rgba(0,0,0,0.8)',
-            position:'relative',
-            overflow:'hidden',
+            border:`1px solid #0A0A08`,
+            borderRadius:'6px', padding:'14px 18px 12px',
+            boxShadow:'inset 0 2px 14px rgba(0,0,0,0.85)',
+            position:'relative', overflow:'hidden',
           }}>
-            {/* scan lines */}
-            <div style={{ position:'absolute', inset:0, background:'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px)', pointerEvents:'none', zIndex:1 }}/>
+            <div style={{ position:'absolute', inset:0, background:'repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.07) 2px,rgba(0,0,0,0.07) 4px)', pointerEvents:'none', zIndex:1 }}/>
             <div style={{ position:'relative', zIndex:2 }}>
-              <LEDDisplay>{chordName}</LEDDisplay>
-              <div style={{ marginTop:'8px', display:'flex', gap:'10px', alignItems:'center', flexWrap:'wrap' }}>
-                <div style={{ fontSize:'10px', color:'rgba(255,170,0,0.6)', letterSpacing:'0.06em', fontFamily:mono }}>{chord?.name?.toUpperCase()}</div>
-                <div style={{ fontSize:'9px', color:'rgba(255,170,0,0.35)', letterSpacing:'0.04em', fontFamily:mono }}>{noteListFull}</div>
+              <div style={{
+                fontFamily:"'VT323','Courier New',monospace",
+                fontSize:'clamp(50px,10vw,86px)',
+                color:C.amber,
+                textShadow:`0 0 12px rgba(255,170,0,0.8),0 0 30px rgba(255,140,0,0.35)`,
+                letterSpacing:'0.02em',
+                lineHeight:1,
+              }}>
+                {chordName}
+              </div>
+              <div style={{ marginTop:'8px', display:'flex', gap:'10px', flexWrap:'wrap', alignItems:'center' }}>
+                <div style={{ fontSize:'10px', color:'rgba(255,170,0,0.6)', letterSpacing:'0.06em' }}>{chord?.name?.toUpperCase()}</div>
+                <div style={{ fontSize:'9px',  color:'rgba(255,170,0,0.32)', letterSpacing:'0.03em' }}>{noteListFull}</div>
               </div>
               {magnificat && extraNames && (
-                <div style={{ marginTop:'4px', fontSize:'9px', color:'rgba(255,180,60,0.5)', letterSpacing:'0.05em', fontStyle:'italic', fontFamily:mono }}>
-                  + {extraNames}
-                </div>
+                <div style={{ marginTop:'3px', fontSize:'9px', color:'rgba(255,180,60,0.45)', fontStyle:'italic', letterSpacing:'0.04em' }}>✦ {extraNames}</div>
               )}
             </div>
           </div>
 
-          {/* Right controls */}
-          <div style={{ display:'flex', flexDirection:'column', gap:'10px', minWidth:'80px' }}>
-
-            {/* PLAY button */}
+          {/* PLAY + MAGNIFICAT */}
+          <div style={{ display:'flex', flexDirection:'column', gap:'8px', minWidth:'76px' }}>
             <button onClick={handlePlay} style={{
               flex:1,
               background: playing
-                ? `radial-gradient(circle, #FF6622 0%, ${C.orange} 100%)`
-                : `radial-gradient(circle at 40% 35%, #3A3A36, #222220)`,
-              border:`1px solid ${playing ? C.orange : '#3A3A36'}`,
-              borderRadius:'8px',
-              cursor:'pointer',
-              display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:'6px',
+                ? `radial-gradient(circle,#FF6622 0%,${C.orange} 100%)`
+                : 'radial-gradient(circle at 40% 35%,#383834,#222220)',
+              border:`1px solid ${playing ? C.orange : C.border}`,
+              borderRadius:'7px', cursor:'pointer',
+              display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:'5px',
               boxShadow: playing
-                ? `0 0 20px rgba(204,68,0,0.6), inset 0 1px 0 rgba(255,140,80,0.3)`
-                : `inset 0 2px 4px rgba(0,0,0,0.5), inset 0 -1px 0 rgba(255,255,255,0.04), 0 1px 0 rgba(255,255,255,0.04)`,
-              transition:'all 0.08s ease',
-              transform: playing ? 'scale(0.97)' : 'scale(1)',
+                ? `0 0 20px rgba(204,68,0,0.6),inset 0 1px 0 rgba(255,140,80,0.3)`
+                : `inset 0 2px 4px rgba(0,0,0,0.5),inset 0 -1px 0 rgba(255,255,255,0.04)`,
+              transition:'all 0.08s', transform: playing ? 'scale(0.97)' : 'scale(1)',
             }}>
-              <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-                <polygon points="7,4 19,11 7,18" fill={playing ? '#fff' : C.labelBrt} style={{ transition:'fill 0.08s' }}/>
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                <polygon points="6,3 18,10 6,17" fill={playing ? '#fff' : C.lblBrt} style={{ transition:'fill 0.08s' }}/>
               </svg>
               <div style={{ fontSize:'7px', letterSpacing:'0.18em', textTransform:'uppercase', color: playing ? 'rgba(255,255,255,0.85)' : C.label }}>PLAY</div>
             </button>
 
-            {/* MAGNIFICAT toggle */}
             <button onClick={() => setMagnicat(m => !m)} style={{
               flex:1,
               background: magnificat
-                ? `linear-gradient(160deg, #8B5A0A, #5A3A04)`
-                : `radial-gradient(circle at 40% 35%, #3A3A36, #222220)`,
-              border:`1px solid ${magnificat ? '#AA7722' : '#3A3A36'}`,
-              borderRadius:'8px',
-              cursor:'pointer',
-              display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:'5px',
+                ? 'linear-gradient(160deg,#3A2200,#281600)'
+                : 'radial-gradient(circle at 40% 35%,#383834,#222220)',
+              border:`1px solid ${magnificat ? '#AA7722' : C.border}`,
+              borderRadius:'7px', cursor:'pointer',
+              display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:'4px',
               boxShadow: magnificat
-                ? `0 0 14px rgba(170,119,34,0.4), inset 0 1px 0 rgba(255,200,80,0.2)`
-                : `inset 0 2px 4px rgba(0,0,0,0.5), inset 0 -1px 0 rgba(255,255,255,0.04)`,
-              transition:'all 0.15s ease',
+                ? `0 0 14px rgba(170,119,34,0.4),inset 0 1px 0 rgba(255,200,80,0.15)`
+                : `inset 0 2px 4px rgba(0,0,0,0.5)`,
+              transition:'all 0.14s',
             }}>
-              {/* Fleur symbol */}
-              <div style={{ fontSize:'18px', lineHeight:1, color: magnificat ? '#FFCC66' : C.label, textShadow: magnificat ? '0 0 8px rgba(255,200,80,0.8)' : 'none', transition:'all 0.15s', fontFamily:'serif' }}>✦</div>
-              <div style={{ fontSize:'6px', letterSpacing:'0.15em', textTransform:'uppercase', color: magnificat ? 'rgba(255,200,80,0.9)' : C.label, lineHeight:'1.3', textAlign:'center' }}>MAGNI<br/>FICAT</div>
+              <div style={{ fontSize:'17px', lineHeight:1, fontFamily:'serif', color: magnificat ? '#FFCC55' : C.label, textShadow: magnificat ? '0 0 8px rgba(255,200,80,0.8)' : 'none', transition:'all 0.14s' }}>✦</div>
+              <div style={{ fontSize:'6px', letterSpacing:'0.14em', textTransform:'uppercase', color: magnificat ? 'rgba(255,200,80,0.9)' : C.label, textAlign:'center', lineHeight:'1.4' }}>MAGNI<br/>FICAT</div>
             </button>
           </div>
         </div>
 
         {/* ── Piano ── */}
         <div style={{
-          background:'#141412',
-          border:'1px solid #0C0C0A',
-          borderRadius:'6px',
-          padding:'12px 12px 16px',
-          marginBottom:'20px',
-          boxShadow:'inset 0 3px 10px rgba(0,0,0,0.7)',
+          background:'#121210', border:`1px solid #0A0A08`,
+          borderRadius:'6px', padding:'12px 12px 16px', marginBottom:'18px',
+          boxShadow:'inset 0 3px 12px rgba(0,0,0,0.7)',
         }}>
           <div style={{ fontSize:'7px', letterSpacing:'0.22em', textTransform:'uppercase', color:C.label, marginBottom:'10px', display:'flex', justifyContent:'space-between' }}>
             <span>TECLADO · 2 OITAVAS</span>
-            {magnificat && <span style={{ color:'rgba(255,180,60,0.5)' }}>✦ EXT. ATIVAS</span>}
+            {magnificat && <span style={{ color:'rgba(255,180,60,0.45)' }}>✦ EXT. ATIVAS</span>}
           </div>
           <Piano activeNotes={activeNotes} extraNotes={extraNotes} />
         </div>
 
-        {/* ── Root selector ── */}
-        <div style={{ marginBottom:'18px' }}>
+        {/* ── Root ── */}
+        <div style={{ marginBottom:'16px' }}>
           <div style={{ fontSize:'7px', letterSpacing:'0.22em', textTransform:'uppercase', color:C.label, marginBottom:'8px' }}>NOTA RAIZ</div>
           <div style={{ display:'flex', flexWrap:'wrap', gap:'4px' }}>
             {ROOTS.map(r => {
               const active = root === r;
               return (
                 <button key={r} onClick={() => setRoot(r)} style={{
-                  width:'46px', height:'36px', fontFamily:mono, fontSize:'12px',
-                  background: active
-                    ? `linear-gradient(160deg, #CC4400, #991100)`
-                    : 'linear-gradient(160deg, #2C2C28, #222220)',
-                  color: active ? '#fff' : C.labelBrt,
-                  border:`1px solid ${active ? '#CC4400' : '#383834'}`,
-                  borderRadius:'4px', cursor:'pointer',
-                  boxShadow: active
-                    ? `0 0 10px rgba(204,68,0,0.4), inset 0 1px 0 rgba(255,140,80,0.3)`
-                    : `inset 0 2px 3px rgba(0,0,0,0.4), inset 0 -1px 0 rgba(255,255,255,0.04)`,
+                  width:'46px', height:'34px', fontFamily:mono, fontSize:'12px',
+                  background: active ? 'linear-gradient(160deg,#CC4400,#991100)' : 'linear-gradient(160deg,#2C2C28,#222220)',
+                  color: active ? '#fff' : C.lblBrt,
+                  border:`1px solid ${active ? '#CC4400' : C.border}`,
+                  borderRadius:'4px', cursor:'pointer', fontWeight: active ? '500' : '400',
+                  boxShadow: active ? '0 0 10px rgba(204,68,0,0.4),inset 0 1px 0 rgba(255,140,80,0.3)' : 'inset 0 2px 3px rgba(0,0,0,0.4)',
                   transition:'all 0.1s',
-                  fontWeight: active ? '500' : '400',
-                }}>
-                  {r}
-                </button>
+                }}>{r}</button>
               );
             })}
           </div>
         </div>
 
         {/* ── Chord type ── */}
-        <div style={{ marginBottom:'18px' }}>
+        <div style={{ marginBottom:'16px' }}>
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'8px' }}>
             <div style={{ fontSize:'7px', letterSpacing:'0.22em', textTransform:'uppercase', color:C.label }}>TIPO DE ACORDE</div>
-            <input
-              placeholder="buscar..."
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              style={{
-                background:'#161614', border:'none',
-                borderBottom:`1px solid #383834`,
-                outline:'none', padding:'2px 4px',
-                fontSize:'10px', color:C.labelBrt,
-                fontFamily:mono, letterSpacing:'0.05em', width:'90px',
-              }}
-            />
+            <input placeholder="buscar..." value={search} onChange={e=>setSearch(e.target.value)} style={{
+              background:'#161614', border:'none', borderBottom:`1px solid ${C.border}`,
+              outline:'none', padding:'2px 4px', fontSize:'10px', color:C.lblBrt,
+              fontFamily:mono, letterSpacing:'0.05em', width:'90px',
+            }}/>
           </div>
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(62px, 1fr))', gap:'4px' }}>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(62px,1fr))', gap:'4px' }}>
             {filteredTypes.map(ct => {
               const active = typeId === ct.id;
               return (
                 <button key={ct.id} onClick={() => setTypeId(ct.id)} style={{
                   padding:'8px 4px 6px', borderRadius:'4px', cursor:'pointer',
-                  background: active
-                    ? `linear-gradient(160deg, #CC4400, #991100)`
-                    : 'linear-gradient(160deg, #2C2C28, #222220)',
-                  color: active ? '#fff' : C.labelBrt,
-                  border:`1px solid ${active ? '#CC4400' : '#383834'}`,
-                  boxShadow: active
-                    ? `0 0 8px rgba(204,68,0,0.3), inset 0 1px 0 rgba(255,140,80,0.2)`
-                    : `inset 0 2px 3px rgba(0,0,0,0.4)`,
+                  background: active ? 'linear-gradient(160deg,#CC4400,#991100)' : 'linear-gradient(160deg,#2C2C28,#222220)',
+                  color: active ? '#fff' : C.lblBrt,
+                  border:`1px solid ${active ? '#CC4400' : C.border}`,
+                  boxShadow: active ? '0 0 8px rgba(204,68,0,0.3),inset 0 1px 0 rgba(255,140,80,0.2)' : 'inset 0 2px 3px rgba(0,0,0,0.4)',
                   transition:'all 0.1s',
                   display:'flex', flexDirection:'column', alignItems:'center', gap:'3px',
                 }}>
                   <span style={{ fontSize:'14px', fontFamily:mono, fontWeight:'500', lineHeight:1, color: active ? '#fff' : C.amber }}>{ct.btn||'M'}</span>
-                  <span style={{ fontSize:'7px', color: active ? 'rgba(255,255,255,0.55)' : C.label, textAlign:'center', lineHeight:'1.2', letterSpacing:'0.02em' }}>{ct.name}</span>
+                  <span style={{ fontSize:'7px', color: active ? 'rgba(255,255,255,0.5)' : C.label, textAlign:'center', lineHeight:'1.2', letterSpacing:'0.02em' }}>{ct.name}</span>
                 </button>
               );
             })}
@@ -543,25 +766,19 @@ export default function App() {
           </div>
         </div>
 
-        {/* ── Voice + divider ── */}
-        <div style={{ paddingTop:'16px', borderTop:'1px solid #2A2A26' }}>
+        {/* ── Voice ── */}
+        <div style={{ paddingTop:'16px', borderTop:`1px solid #2A2A26` }}>
           <div style={{ fontSize:'7px', letterSpacing:'0.22em', textTransform:'uppercase', color:C.label, marginBottom:'8px' }}>VOZ</div>
           <div style={{ display:'flex', alignItems:'center', gap:'10px', flexWrap:'wrap' }}>
-            <button
-              onClick={listening ? stopListening : startListening}
-              style={{
-                padding:'8px 16px', borderRadius:'4px', cursor:'pointer',
-                fontFamily:mono, fontSize:'9px', letterSpacing:'0.15em', textTransform:'uppercase',
-                background: listening
-                  ? `linear-gradient(160deg, ${C.orange}, #991100)`
-                  : 'linear-gradient(160deg, #2C2C28, #222220)',
-                color: listening ? '#fff' : C.labelBrt,
-                border:`1px solid ${listening ? C.orange : '#383834'}`,
-                boxShadow: listening
-                  ? `0 0 12px rgba(204,68,0,0.5)`
-                  : `inset 0 2px 3px rgba(0,0,0,0.4)`,
-                display:'flex', alignItems:'center', gap:'7px', transition:'all 0.12s',
-              }}>
+            <button onClick={listening ? stopListening : startListening} style={{
+              padding:'8px 16px', borderRadius:'4px', cursor:'pointer',
+              fontFamily:mono, fontSize:'9px', letterSpacing:'0.15em', textTransform:'uppercase',
+              background: listening ? `linear-gradient(160deg,${C.orange},#991100)` : 'linear-gradient(160deg,#2C2C28,#222220)',
+              color: listening ? '#fff' : C.lblBrt,
+              border:`1px solid ${listening ? C.orange : C.border}`,
+              boxShadow: listening ? `0 0 12px rgba(204,68,0,0.5)` : 'inset 0 2px 3px rgba(0,0,0,0.4)',
+              display:'flex', alignItems:'center', gap:'7px', transition:'all 0.12s',
+            }}>
               <span style={{
                 width:'6px', height:'6px', borderRadius:'50%', display:'inline-block',
                 background: listening ? 'rgba(255,255,255,0.9)' : C.label,
@@ -572,7 +789,7 @@ export default function App() {
             </button>
             {voiceMsg
               ? <span style={{ fontSize:'9px', color:C.label, fontStyle:'italic', letterSpacing:'0.04em' }}>{voiceMsg}</span>
-              : <span style={{ fontSize:'8px', color:'#3C3C36', letterSpacing:'0.04em' }}>Ex: "Dó menor sete" · "Sol maior" · "Ré diminuto"</span>
+              : <span style={{ fontSize:'8px', color:'#363630', letterSpacing:'0.04em' }}>Ex: "Dó menor sete" · "Sol maior"</span>
             }
           </div>
         </div>
@@ -583,9 +800,9 @@ export default function App() {
         @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=VT323&display=swap');
         * { box-sizing:border-box; margin:0; padding:0; }
         body { background:#141412; }
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.25} }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.2} }
         button { font-family:'IBM Plex Mono',monospace; }
-        input::placeholder { color:#3C3C36; }
+        input::placeholder { color:#3A3A34; }
       `}</style>
     </div>
   );
