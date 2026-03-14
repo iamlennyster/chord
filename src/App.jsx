@@ -408,7 +408,7 @@ function Piano({ activeNotes, extraNotes }) {
                 ? 'linear-gradient(180deg,#E8660A 0%,#CC4400 100%)'
                 : isExtra
                   ? 'linear-gradient(180deg,#E8C060 0%,#C89040 100%)'
-                  : 'linear-gradient(180deg,#E8E4D8 0%,#CECA BC 100%)',
+                  : 'linear-gradient(180deg,#E8E4D8 0%,#CECABC 100%)',
               borderRadius:'0 0 6px 6px',
               boxShadow: isActive
                 ? 'inset 0 -3px 0 rgba(0,0,0,0.35),0 2px 10px rgba(204,68,0,0.5)'
